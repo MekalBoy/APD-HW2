@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -5,6 +6,7 @@
 #include <map>
 #include <mpi.h>
 #include <pthread.h>
+#include <set>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string>
@@ -25,7 +27,11 @@ struct hashInfo {
     bool owned = false;
     int id = -1; // the # of the segment (they need to be in order)
 
-    vector<int> owners; // ids of clients that hold this piece - only used by tracker
+    // vector<int> owners; // ids of clients that hold this piece - only used by tracker (but probably not upon re-reading)
+};
+
+bool compareByHashInfo(const std::pair<std::string, hashInfo>& a, const std::pair<std::string, hashInfo>& b) {
+    return a.second.id < b.second.id;
 };
 
 struct fileInfo {
@@ -36,7 +42,7 @@ struct fileInfo {
     bool complete = false; // only used by client
     bool wanted = false; // same
 
-    vector<int> owners; // ids of clients that hold pieces of that file - this is only used by tracker
+    set<int> owners; // ids of clients that hold pieces of that file - this is only used by tracker
 };
 
 void *download_thread_func(void *arg)
@@ -77,8 +83,46 @@ void tracker(int numtasks, int rank) {
             MPI_Recv(clientFile.filename, MAX_FILENAME, MPI_CHAR, i, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
             MPI_Recv(&clientFile.completeNr, 1, MPI_INT, i, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
-            printf("[TRACKER] Rank %d has file \"%s\" with %d chunks.\n", i, clientFile.filename, clientFile.completeNr);
+            printf("[TRACKER] Rank %d has file \"%s\" (%d/%d) with %d chunks:\n", i, clientFile.filename, j + 1, filesOwned, clientFile.completeNr);
+
+            // We receive a flattened array and then reconstruct it to minimize overhead
+
+            // completeNr * 32 = nr of chars needed to be received for this file
+            vector<char> buffer(clientFile.completeNr * HASH_SIZE);
+            MPI_Recv(buffer.data(), clientFile.completeNr * HASH_SIZE, MPI_CHAR, i, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+
+            // reconstruct into hashes (strings)
+            for (int k = 0; k < clientFile.completeNr; k++) {
+                string hash = string(&buffer[k * HASH_SIZE], HASH_SIZE);
+
+                hashInfo info;
+                info.id = k;
+                info.owned = false; // tracker ofc does not own this
+
+                clientFile.hashes[hash] = info;
+            }
+
+            int k = 0;
+
+            for (auto &pair : clientFile.hashes) {
+                printf("[TRACKER] %d - %s\n", k, pair.first.c_str());
+                k++;
+            }
+
+            if (trackerFiles.find(clientFile.filename) == trackerFiles.end()) {
+                trackerFiles[clientFile.filename] = clientFile;
+            }
+
+            trackerFiles[clientFile.filename].owners.insert(i);
         }
+    }
+
+    for (auto &pair : trackerFiles) {
+        cout << "[TRACKER] File " << pair.first << " is owned by ";
+        for (auto &item : pair.second.owners) {
+            cout << item << " ";
+        }
+        cout << endl;
     }
 
     // Go signal
@@ -177,6 +221,26 @@ void peer(int numtasks, int rank) {
         if (myInfo.complete) {
             MPI_Send(myInfo.filename, MAX_FILENAME, MPI_CHAR, TRACKER_RANK, 0, MPI_COMM_WORLD);
             MPI_Send(&myInfo.completeNr, 1, MPI_INT, TRACKER_RANK, 0, MPI_COMM_WORLD);
+
+            std::vector<std::pair<std::string, hashInfo>> items(myInfo.hashes.begin(), myInfo.hashes.end());
+
+            // Sort the vector using the custom comparator
+            sort(items.begin(), items.end(), compareByHashInfo);
+
+            vector<string> hashes;
+            for (const auto& [key, value] : myInfo.hashes) {
+                hashes.push_back(key);
+            }
+
+            // We send a flattened array and then reconstruct it to minimize overhead
+
+            // completeNr * 32 = nr of chars needed to be sent for this file
+            vector<char> buffer(myInfo.completeNr * HASH_SIZE, '\0');
+
+            for (int i = 0; i < myInfo.completeNr; i++) {
+                std::strncpy(&buffer[i * HASH_SIZE], hashes[i].c_str(), HASH_SIZE);
+            }
+            MPI_Send(buffer.data(), myInfo.completeNr * HASH_SIZE, MPI_CHAR, TRACKER_RANK, 0, MPI_COMM_WORLD);
         }
     }
 

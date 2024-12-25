@@ -3,3 +3,6 @@ build:
 
 clean:
 	rm -rf tema2
+
+run: build
+	mpirun -np 4 tema2
