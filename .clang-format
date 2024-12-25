@@ -1,0 +1,5 @@
+Language: Cpp
+IndentWidth: 4
+UseTab: Always
+TabWidth: 4
+ColumnLimit: 0  # No limit on line length
