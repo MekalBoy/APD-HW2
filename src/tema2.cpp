@@ -1,10 +1,10 @@
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <iostream>
 #include <mpi.h>
 #include <pthread.h>
-#include <set>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string>
@@ -16,6 +16,8 @@
 #define MAX_FILENAME 15
 #define HASH_SIZE 32
 #define MAX_CHUNKS 100
+
+#define SYNC_TIMER 10
 
 using namespace std;
 
@@ -34,7 +36,7 @@ struct fileInfo {
 	bool complete = false; // only used by client
 	bool wanted = false;   // same
 
-	set<int> owners; // ids of clients that hold pieces of that file - this is only used by tracker
+	vector<int> owners; // ids of clients that hold pieces of that file
 };
 
 MPI_Status mpiStatus;
@@ -49,14 +51,42 @@ char filename[MAX_FILENAME];
 void *download_thread_func(void *arg) {
 	int rank = *(int *)arg;
 
+	int syncTimer = SYNC_TIMER;
+
 	while (nrFilesWanted > 0) {
+
+		// Sync (only happens every 10 segments)
+		if (syncTimer == SYNC_TIMER) {
+			syncTimer = 0;
+			for (auto &pair : myFiles) {
+				// Request updated swarms for each file that is wanted but still incomplete
+				if (pair.second.wanted && !pair.second.complete) {
+					MPI_Send(pair.first.c_str(), MAX_FILENAME, MPI_CHAR, TRACKER_RANK, 2, MPI_COMM_WORLD);
+
+					// receive number of owners (int) and owners (also ints) afterwards
+					int nrOwners;
+					MPI_Recv(&nrOwners, 1, MPI_INT, TRACKER_RANK, 2, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+
+					myFiles[pair.first].owners.resize(nrOwners);
+					MPI_Recv(myFiles[pair.first].owners.data(), nrOwners, MPI_INT, TRACKER_RANK, 2, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+					
+					cout << "Client " << rank << " is looking for file " << pair.first << " by checking these: ";
+					for (auto elem : myFiles[pair.first].owners) {
+						cout << elem << " ";
+					}
+					cout << endl;
+				}
+			}
+
+		}
+
 		// download x10, sync, repeat
 		nrFilesWanted--;
 		filename[0] = '\0';
 		MPI_Send(&filename, MAX_FILENAME, MPI_CHAR, TRACKER_RANK, 0, MPI_COMM_WORLD);
 	}
 
-	// once all wanted files are downloaded this thread closes
+	// once all wanted files are downloaded write them in the clientR_filename
 
 	return NULL;
 }
@@ -67,6 +97,7 @@ void *upload_thread_func(void *arg) {
 	while (true) {
 		MPI_Recv(&filename, MAX_FILENAME, MPI_CHAR, MPI_ANY_SOURCE, 1, MPI_COMM_WORLD, &mpiStatus);
 
+		// tracker will never send a "tag 1" except for when everyone has finished
 		if (mpiStatus.MPI_SOURCE == TRACKER_RANK) {
 			break;
 		}
@@ -126,7 +157,10 @@ void tracker(int numtasks, int rank) {
 				trackerFiles[clientFile.filename] = clientFile;
 			}
 
-			trackerFiles[clientFile.filename].owners.insert(i);
+			vector<int> &owners = trackerFiles[clientFile.filename].owners;
+			if (find(owners.begin(), owners.end(), i) == owners.end()) {
+				owners.push_back(i);
+			}
 		}
 	}
 
@@ -186,7 +220,26 @@ void tracker(int numtasks, int rank) {
 					return;
 				}
 				break;
-			case 1:
+			case 1: // reserved for client-client communication (download/upload)
+				break;
+			case 2: {// Sync request from client
+				fileInfo &requestedFile = trackerFiles[filename];
+
+				int nrOwners = requestedFile.owners.size();
+				MPI_Send(&nrOwners, 1, MPI_INT, mpiStatus.MPI_SOURCE, 2, MPI_COMM_WORLD);
+
+				MPI_Send(requestedFile.owners.data(), nrOwners, MPI_INT, mpiStatus.MPI_SOURCE, 2, MPI_COMM_WORLD);
+
+				// we can also add this requester to the file swarm
+				vector<int> &owners = requestedFile.owners;
+				if (find(owners.begin(), owners.end(), mpiStatus.MPI_SOURCE) == owners.end()) {
+					owners.push_back(mpiStatus.MPI_SOURCE);
+				}
+
+				break;
+			}
+			default:
+				printf("[TRACKER] How did we get here?\n");
 				break;
 		}
 	}
