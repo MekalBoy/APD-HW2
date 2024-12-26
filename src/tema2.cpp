@@ -27,8 +27,9 @@ struct hashInfo {
 
 struct fileInfo {
 	char filename[MAX_FILENAME];
-	vector<hashInfo> hashes;
-	int completeNr; // number of unique hashes needed to consider the file complete
+	vector<hashInfo> hashes; // the hash info of the segments of this file
+	int segmentsNr;			 // the number of segments we have
+	int completeNr;			 // number of segments needed to consider the file complete
 
 	bool complete = false; // only used by client
 	bool wanted = false;   // same
@@ -36,8 +37,26 @@ struct fileInfo {
 	set<int> owners; // ids of clients that hold pieces of that file - this is only used by tracker
 };
 
+MPI_Status mpiStatus;
+
+pmr::unordered_map<string, fileInfo> myFiles;
+int nrFilesWanted;
+
+bool finished = false;
+
+char filename[MAX_FILENAME];
+
 void *download_thread_func(void *arg) {
 	int rank = *(int *)arg;
+
+	while (nrFilesWanted > 0) {
+		// download x10, sync, repeat
+		nrFilesWanted--;
+		filename[0] = '\0';
+		MPI_Send(&filename, MAX_FILENAME, MPI_CHAR, TRACKER_RANK, 0, MPI_COMM_WORLD);
+	}
+
+	// once all wanted files are downloaded this thread closes
 
 	return NULL;
 }
@@ -45,12 +64,18 @@ void *download_thread_func(void *arg) {
 void *upload_thread_func(void *arg) {
 	int rank = *(int *)arg;
 
+	while (true) {
+		MPI_Recv(&filename, MAX_FILENAME, MPI_CHAR, MPI_ANY_SOURCE, 1, MPI_COMM_WORLD, &mpiStatus);
+
+		if (mpiStatus.MPI_SOURCE == TRACKER_RANK) {
+			break;
+		}
+	}
+
 	return NULL;
 }
 
 void tracker(int numtasks, int rank) {
-	MPI_Status mpiStatus;
-
 	pmr::unordered_map<string, fileInfo> trackerFiles; // information for the tracker
 
 	// Receive data from clients (who is seeding what)
@@ -68,11 +93,12 @@ void tracker(int numtasks, int rank) {
 
 			clientFile.filename[0] = '\0';
 			clientFile.completeNr = -1;
+			clientFile.segmentsNr = -1; // doesn't matter
 
 			MPI_Recv(clientFile.filename, MAX_FILENAME, MPI_CHAR, i, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 			MPI_Recv(&clientFile.completeNr, 1, MPI_INT, i, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
-			printf("[TRACKER] Rank %d has file \"%s\" (%d/%d) with %d chunks:\n", i, clientFile.filename, j + 1, filesOwned, clientFile.completeNr);
+			printf("[TRACKER] Rank %d has file \"%s\" (%d/%d) with %d chunks.\n", i, clientFile.filename, j + 1, filesOwned, clientFile.completeNr);
 
 			// We receive a flattened array and then reconstruct it to minimize overhead
 
@@ -92,9 +118,9 @@ void tracker(int numtasks, int rank) {
 				clientFile.hashes.push_back(info);
 			}
 
-			for (int k = 0; k < clientFile.completeNr; k++) {
-				printf("[TRACKER] %d - %s\n", k, clientFile.hashes[k].hash);
-			}
+			// for (int k = 0; k < clientFile.completeNr; k++) {
+			// 	printf("[TRACKER] %d - %s\n", k, clientFile.hashes[k].hash);
+			// }
 
 			if (trackerFiles.find(clientFile.filename) == trackerFiles.end()) {
 				trackerFiles[clientFile.filename] = clientFile;
@@ -112,15 +138,58 @@ void tracker(int numtasks, int rank) {
 		cout << endl;
 	}
 
+	// Receive wanted files from clients
+
+	int wantedNr = 0; // we use this to know when to close the swarm
+
+	/*	Some comments about the lone integer as opposed to a more detailed hashmap
+		usually a more "specific" spread of information would be better
+		ex: clients 1 2 may only want each other's files (noone wants theirs) and can be shutdown individually to save power
+		but in this case all the tests are pretty homogenous (everyone wants a piece of everyone, more or less)
+		so this simpler way aids us more - once this nr reaches 0 again we can shut down the whole cluster
+	*/
+
+	for (int i = 1; i < numtasks; i++) {
+		int wanted;
+		MPI_Recv(&wanted, 1, MPI_INT, i, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+
+		wantedNr += wanted;
+	}
+
+	printf("[TRACKER] There are %d wanted files across the whole cluster.\n", wantedNr);
+
 	// Go signal
 	for (int i = 1; i < numtasks; i++) {
 		MPI_Send(NULL, 0, MPI_INT, i, 0, MPI_COMM_WORLD);
 	}
 
 	// While loop to check for requests
-	// while (1) {
+	while (1) {
+		char filename[FILENAME_MAX];
 
-	// }
+		MPI_Recv(&filename, FILENAME_MAX, MPI_CHAR, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &mpiStatus);
+
+		// Deduce request type by tag
+		switch (mpiStatus.MPI_TAG) {
+			case 0: // client finished a download (got a wanted file)
+				wantedNr--; // one more file
+
+				printf("[TRACKER] Client %d got 1 more file. (%d left)\n", mpiStatus.MPI_SOURCE, wantedNr);
+
+				// send kill message to all once all tasks are done
+				if (wantedNr == 0) {
+					for (int i = 1; i < numtasks; i++) {
+						MPI_Send(filename, MAX_FILENAME, MPI_CHAR, i, 1, MPI_COMM_WORLD);
+					}
+
+					// Finish
+					return;
+				}
+				break;
+			case 1:
+				break;
+		}
+	}
 }
 
 void peer(int numtasks, int rank) {
@@ -134,8 +203,6 @@ void peer(int numtasks, int rank) {
 	inFile.open(inFilename);
 
 	// cout << "Rank " << rank << " opened file " << inFilename << ".\n";
-
-	pmr::unordered_map<string, fileInfo> myFiles;
 
 	// Files the client has
 
@@ -151,6 +218,7 @@ void peer(int numtasks, int rank) {
 		fileInfo info;
 		strcpy(info.filename, fileName.c_str());
 		info.completeNr = nrChunks;
+		info.segmentsNr = nrChunks; // doesn't matter because we don't want the file
 		info.complete = true;
 		info.wanted = false;
 
@@ -172,7 +240,6 @@ void peer(int numtasks, int rank) {
 
 	// Files the client wants
 
-	int nrFilesWanted;
 	inFile >> nrFilesWanted;
 
 	for (int i = 0; i < nrFilesWanted; i++) {
@@ -182,6 +249,8 @@ void peer(int numtasks, int rank) {
 		fileInfo info;
 		strcpy(info.filename, fileName.c_str());
 		info.complete = false;
+		info.segmentsNr = 0;	  // we want it and we have no segments
+		info.completeNr = 999999; // we do not know how many segments are needed
 		info.wanted = true;
 
 		myFiles[fileName] = info;
@@ -212,6 +281,8 @@ void peer(int numtasks, int rank) {
 		}
 	}
 
+	MPI_Send(&nrFilesWanted, 1, MPI_INT, TRACKER_RANK, 0, MPI_COMM_WORLD);
+
 	// Await OK signal (no data)
 
 	MPI_Recv(NULL, 0, MPI_INT, TRACKER_RANK, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
@@ -234,11 +305,15 @@ void peer(int numtasks, int rank) {
 		exit(-1);
 	}
 
+	printf("Client %d has finished downloading everything. (upload is still on)\n", rank);
+
 	r = pthread_join(upload_thread, &status);
 	if (r) {
 		printf("Eroare la asteptarea thread-ului de upload\n");
 		exit(-1);
 	}
+
+	printf("Client %d has finished.\n", rank);
 }
 
 int main(int argc, char *argv[]) {
