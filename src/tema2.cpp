@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -23,7 +24,7 @@ using namespace std;
 
 struct hashInfo {
 	char hash[HASH_SIZE];
-	bool owned = false;
+	int owned = 0; // technically a bool, but for ease of use with MPI this is an int (bool to int conversion is implicit in cpp)
 	int id = -1; // the # of the segment (they need to be in order)
 };
 
@@ -43,6 +44,7 @@ MPI_Status mpiStatus;
 
 pmr::unordered_map<string, fileInfo> myFiles;
 int nrFilesWanted;
+vector<string> filesWanted;
 
 bool finished = false;
 
@@ -52,6 +54,10 @@ void *download_thread_func(void *arg) {
 	int rank = *(int *)arg;
 
 	int syncTimer = SYNC_TIMER;
+
+	// anti-choke algorithm?
+	pmr::unordered_map<int, int> disturbances;
+	srand(rank);
 
 	while (nrFilesWanted > 0) {
 
@@ -70,15 +76,30 @@ void *download_thread_func(void *arg) {
 					myFiles[pair.first].owners.resize(nrOwners);
 					MPI_Recv(myFiles[pair.first].owners.data(), nrOwners, MPI_INT, TRACKER_RANK, 2, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 					
-					cout << "Client " << rank << " is looking for file " << pair.first << " by checking these: ";
-					for (auto elem : myFiles[pair.first].owners) {
-						cout << elem << " ";
-					}
-					cout << endl;
+					// cout << "Client " << rank << " is looking for file " << pair.first << " by checking these: ";
+					// for (auto elem : myFiles[pair.first].owners) {
+					// 	cout << elem << " ";
+					// }
+					// cout << endl;
 				}
 			}
-
 		}
+
+		// pick a file of the ones I want (randomly)
+		// pick a segment (not sure it matters much - might just be currSegment)
+		// pick a seeder (the one disturbed least, randomly, increment "disturbance")
+		// if I got the segment - increment currSegment of the file, increment syncTimer
+
+		// strncpy(filename, filesWanted[rand() % filesWanted.size()].c_str(), MAX_FILENAME);
+
+		// fileInfo wantedFile = myFiles[filename];
+
+		// hashInfo wantedHash = wantedFile.hashes[wantedFile.segmentsNr];
+
+		// int leastDisturbed = -1;
+		// for (int peer : wantedFile.owners) {
+
+		// }
 
 		// download x10, sync, repeat
 		nrFilesWanted--;
@@ -100,6 +121,20 @@ void *upload_thread_func(void *arg) {
 		// tracker will never send a "tag 1" except for when everyone has finished
 		if (mpiStatus.MPI_SOURCE == TRACKER_RANK) {
 			break;
+		}
+
+		fileInfo &requestedFile = myFiles[filename];
+
+		char requestedHash[HASH_SIZE];
+
+		MPI_Recv(&requestedHash, HASH_SIZE, MPI_CHAR, mpiStatus.MPI_SOURCE, 1, MPI_COMM_WORLD, &mpiStatus);
+
+		// check if we have it and send a yes/no reply (1/0 int)
+
+		for (hashInfo possibleHash : requestedFile.hashes) {
+			if (strncmp(possibleHash.hash, requestedHash, HASH_SIZE) == 0) {
+				MPI_Send(&possibleHash.owned, 1, MPI_INT, mpiStatus.MPI_SOURCE, 1, MPI_COMM_WORLD);
+			}
 		}
 	}
 
@@ -298,6 +333,8 @@ void peer(int numtasks, int rank) {
 	for (int i = 0; i < nrFilesWanted; i++) {
 		inFile >> fileName;
 		cout << "Rank " << rank << " wants file \"" << fileName << "\".\n";
+
+		filesWanted.push_back(fileName);
 
 		fileInfo info;
 		strcpy(info.filename, fileName.c_str());
