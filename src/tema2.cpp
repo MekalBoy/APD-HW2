@@ -214,7 +214,6 @@ void tracker(int numtasks, int rank) {
 
 			// We receive a flattened array and then reconstruct it to minimize overhead
 
-			// completeNr * 32 = nr of chars needed to be received for this file
 			vector<char> buffer(clientFile.completeNr * HASH_SIZE);
 			MPI_Recv(buffer.data(), clientFile.completeNr * HASH_SIZE, MPI_CHAR, i, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
@@ -229,10 +228,6 @@ void tracker(int numtasks, int rank) {
 
 				clientFile.hashes.push_back(info);
 			}
-
-			// for (int k = 0; k < clientFile.completeNr; k++) {
-			// 	printf("[TRACKER] %d - %s\n", k, clientFile.hashes[k].hash);
-			// }
 
 			if (trackerFiles.find(clientFile.filename) == trackerFiles.end()) {
 				trackerFiles[clientFile.filename] = clientFile;
@@ -274,15 +269,20 @@ void tracker(int numtasks, int rank) {
 		for (int j = 0; j < wanted; j++) {
 			char wantedFilename[MAX_FILENAME];
 			MPI_Recv(wantedFilename, MAX_FILENAME, MPI_CHAR, i, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-			// printf("[TRACKER] Client %d wants info for file %s\n", i, wantedFilename);
 
 			fileInfo wantedFile = trackerFiles[wantedFilename];
 
 			MPI_Send(&wantedFile.completeNr, 1, MPI_INT, i, 0, MPI_COMM_WORLD);
 
-			for (hashInfo info : wantedFile.hashes) {
-				MPI_Send(info.hash, HASH_SIZE, MPI_CHAR, i, 0, MPI_COMM_WORLD);
+			// We send a flattened array to minimize overhead
+
+			std::vector<char> buffer(wantedFile.completeNr * HASH_SIZE, '\0');
+
+			for (int k = 0; k < wantedFile.completeNr; k++) {
+				std::strncpy(&buffer[k * HASH_SIZE], wantedFile.hashes[k].hash, HASH_SIZE);
 			}
+
+			MPI_Send(buffer.data(), wantedFile.completeNr * HASH_SIZE, MPI_CHAR, i, 0, MPI_COMM_WORLD);
 		}
 	}
 
@@ -436,13 +436,22 @@ void peer(int numtasks, int rank) {
 		MPI_Send(wantedFilename, MAX_FILENAME, MPI_CHAR, TRACKER_RANK, 0, MPI_COMM_WORLD);
 
 		MPI_Recv(&myFiles[wantedFilename].completeNr, 1, MPI_INT, TRACKER_RANK, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-		for (int j = 0; j < myFiles[wantedFilename].completeNr; j++) {
-			hashInfo newHash;
-			newHash.owned = false;
-			newHash.id = j;
-			MPI_Recv(newHash.hash, HASH_SIZE, MPI_CHAR, TRACKER_RANK, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
-			myFiles[wantedFilename].hashes.push_back(newHash);
+		// We receive a flattened array and then reconstruct it to minimize overhead
+
+		vector<char> buffer(myFiles[wantedFilename].completeNr * HASH_SIZE);
+		MPI_Recv(buffer.data(), myFiles[wantedFilename].completeNr * HASH_SIZE, MPI_CHAR, TRACKER_RANK, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+
+		// reconstruct into hashes (strings)
+		for (int k = 0; k < myFiles[wantedFilename].completeNr; k++) {
+			string hash = string(&buffer[k * HASH_SIZE], HASH_SIZE);
+
+			hashInfo info;
+			strncpy(info.hash, hash.c_str(), HASH_SIZE);
+			info.id = k;
+			info.owned = false; // tracker ofc does not own this
+
+			myFiles[wantedFilename].hashes.push_back(info);
 		}
 	}
 
