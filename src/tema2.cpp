@@ -26,7 +26,7 @@ using namespace std;
 struct hashInfo {
 	char hash[HASH_SIZE];
 	int owned = 0; // technically a bool, but for ease of use with MPI this is an int (bool to int conversion is implicit in cpp)
-	int id = -1; // the # of the segment (they need to be in order)
+	int id = -1;   // the # of the segment (they need to be in order)
 };
 
 struct fileInfo {
@@ -46,8 +46,6 @@ MPI_Status mpiStatus;
 pmr::unordered_map<string, fileInfo> myFiles;
 int nrFilesWanted;
 vector<string> filesWanted;
-
-bool finished = false;
 
 void *download_thread_func(void *arg) {
 	int rank = *(int *)arg;
@@ -69,18 +67,11 @@ void *download_thread_func(void *arg) {
 				if (pair.second.wanted && !pair.second.complete) {
 					MPI_Send(pair.first.c_str(), MAX_FILENAME, MPI_CHAR, TRACKER_RANK, 2, MPI_COMM_WORLD);
 
-					// receive number of owners (int) and owners (also ints) afterwards
 					int nrOwners;
 					MPI_Recv(&nrOwners, 1, MPI_INT, TRACKER_RANK, 2, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
 					myFiles[pair.first].owners.resize(nrOwners);
 					MPI_Recv(myFiles[pair.first].owners.data(), nrOwners, MPI_INT, TRACKER_RANK, 2, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-					
-					// cout << "Client " << rank << " is looking for file " << pair.first << " by checking these: ";
-					// for (auto elem : myFiles[pair.first].owners) {
-					// 	cout << elem << " ";
-					// }
-					// cout << endl;
 				}
 			}
 		} else {
@@ -117,7 +108,7 @@ void *download_thread_func(void *arg) {
 
 		// possible victims - now randomly choose one!
 		int chosenPeer = leastDisturbed[rand() % leastDisturbed.size()];
-		printf("Client %d seeking file \"%s\" hash #%d - %s from %d\n", rank, filename, wantedFile->segmentsNr, wantedHash->hash, chosenPeer);
+		// printf("Client %d seeking file \"%s\" hash #%d - %s from %d\n", rank, filename, wantedFile->segmentsNr, wantedHash->hash, chosenPeer);
 
 		MPI_Send(filename, MAX_FILENAME, MPI_CHAR, chosenPeer, 1, MPI_COMM_WORLD);
 		MPI_Send(&wantedHash->hash, HASH_SIZE, MPI_CHAR, chosenPeer, 2, MPI_COMM_WORLD);
@@ -128,7 +119,6 @@ void *download_thread_func(void *arg) {
 		if (wantedHash->owned == 1) {
 			wantedFile->segmentsNr++;
 
-			// succesful disturbance - increment disturbances
 			disturbances[chosenPeer]++;
 
 			// Successfully completed a wanted file
@@ -156,14 +146,12 @@ void *download_thread_func(void *arg) {
 				clientFile.close();
 			}
 		} else {
-			// maybe add more because of an unsuccessful disturbance - should give the peer more time to gather other hashes
+			// Add more because of an unsuccessful disturbance - should give the peer more time to gather other hashes
 			disturbances[chosenPeer] += 5;
-			// test through `time make run` for quickness and `make run | wc -l` for miss-count
+			// test through `time make run` for quickness and `make run | wc -l` for miss-count (whilst making logs for each "check")
 			// the lower the better for both
 		}
 	}
-
-	// once all wanted files are downloaded write them in the clientR_filename
 
 	return NULL;
 }
@@ -313,7 +301,7 @@ void tracker(int numtasks, int rank) {
 
 		// Deduce request type by tag
 		switch (mpiStatus.MPI_TAG) {
-			case 0: // client finished a download (got a wanted file)
+			case 0:			// client finished a download (got a wanted file)
 				wantedNr--; // one more file
 
 				printf("[TRACKER] Client %d got 1 more file. (%d left)\n", mpiStatus.MPI_SOURCE, wantedNr);
@@ -330,7 +318,7 @@ void tracker(int numtasks, int rank) {
 				break;
 			case 1: // reserved for client-client communication (download/upload)
 				break;
-			case 2: {// Sync request from client
+			case 2: { // Sync request from client
 				fileInfo &requestedFile = trackerFiles[filename];
 
 				int nrOwners = requestedFile.owners.size();
@@ -363,8 +351,6 @@ void peer(int numtasks, int rank) {
 	string inFilename = "in" + to_string(rank) + ".txt";
 	inFile.open(inFilename);
 
-	// cout << "Rank " << rank << " opened file " << inFilename << ".\n";
-
 	// Files the client has
 
 	int nrFilesOwned;
@@ -393,7 +379,6 @@ void peer(int numtasks, int rank) {
 			ownedHash.id = j;
 
 			info.hashes.push_back(ownedHash);
-			// cout << "Rank " << rank << " with file \"" << fileName << "\" chunk - #" << j << " " << ownedHash.hash << "\n";
 		}
 
 		myFiles[fileName] = info;
@@ -426,7 +411,7 @@ void peer(int numtasks, int rank) {
 	MPI_Send(&nrFilesOwned, 1, MPI_INT, TRACKER_RANK, 0, MPI_COMM_WORLD);
 
 	for (const auto &pair : myFiles) {
-		fileInfo myInfo = pair.second; // The value (fileInfo object)
+		fileInfo myInfo = pair.second;
 
 		if (myInfo.complete) {
 			MPI_Send(myInfo.filename, MAX_FILENAME, MPI_CHAR, TRACKER_RANK, 0, MPI_COMM_WORLD);
@@ -451,7 +436,6 @@ void peer(int numtasks, int rank) {
 		MPI_Send(wantedFilename, MAX_FILENAME, MPI_CHAR, TRACKER_RANK, 0, MPI_COMM_WORLD);
 
 		MPI_Recv(&myFiles[wantedFilename].completeNr, 1, MPI_INT, TRACKER_RANK, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-		printf("Client %d knows to look for %d hashes in %s\n", rank, myFiles[wantedFilename].completeNr, wantedFilename);
 		for (int j = 0; j < myFiles[wantedFilename].completeNr; j++) {
 			hashInfo newHash;
 			newHash.owned = false;
