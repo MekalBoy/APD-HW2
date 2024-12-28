@@ -93,7 +93,7 @@ void *download_thread_func(void *arg) {
 		int minDisturbance = INT_MAX;
 		for (int peer : wantedFile->owners) {
 			// never seen this guy before - add to disturbances list (we may disturb 'em later)
-			if (disturbances.find(peer) == disturbances.end()) {
+			if (peer != rank && disturbances.find(peer) == disturbances.end()) {
 				disturbances[peer] = 0;
 			}
 
